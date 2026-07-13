@@ -27,9 +27,12 @@ Install dependencies:
     pip install requests beautifulsoup4 pandas lxml
 
 Usage:
-    python build_schedview_visit_table.py
+    python build_rubin_nightsum.py --start-date 2026-06-01 --end-date 2026-06-30
+    python build_rubin_nightsum.py --json-only
+    python build_rubin_nightsum.py --output-dir ./out
 """
 
+import argparse
 import base64
 import json
 import re
@@ -43,17 +46,44 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://s3df.slac.stanford.edu/data/rubin/sim-data/schedview/reports/"
 TOC_URL = BASE_URL + "schedview_reports_toc.html"
 
-# Where to write outputs
-OUTPUT_DIR = Path(".")
-CACHE_DIR = OUTPUT_DIR / "nightsum_json_cache"   # raw per-night JSON saved here
-COMBINED_CSV = OUTPUT_DIR / "lsstcam_visits_all_nights.csv"
-
-# Set to an integer (e.g. 3) to only process a handful of nights while
-# testing; set to None to process everything.
-LIMIT_NIGHTS = None
-
 # Be polite to the server between requests (seconds).
 REQUEST_DELAY = 0.5
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Build a multi-night lsstcam visit table from Rubin "
+        "schedview nightsum reports.",
+    )
+    parser.add_argument(
+        "--start-date",
+        default=None,
+        help="Only include nights on or after this date (YYYY-MM-DD).",
+    )
+    parser.add_argument(
+        "--end-date",
+        default=None,
+        help="Only include nights on or before this date (YYYY-MM-DD).",
+    )
+    parser.add_argument(
+        "--json-only",
+        action="store_true",
+        help="Only download/cache per-night JSON files; skip building the "
+        "combined CSV.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Only process the first N qualifying nights (mainly for testing).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=".",
+        help="Base directory for outputs (JSON cache dir and combined CSV). "
+        "Default: current directory.",
+    )
+    return parser.parse_args()
 
 
 def get_qualifying_nights():
@@ -161,14 +191,26 @@ def extract_embedded_json(html_text):
 
 
 def main():
-    CACHE_DIR.mkdir(exist_ok=True)
+    args = parse_args()
+
+    output_dir = Path(args.output_dir)
+    cache_dir = output_dir / "nightsum_json_cache"
+    combined_csv = output_dir / "lsstcam_visits_all_nights.csv"
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     print("Fetching report index...")
     nights = get_qualifying_nights()
     print(f"Found {len(nights)} lsstcam nights with science_visits > 0")
 
-    if LIMIT_NIGHTS:
-        nights = nights[:LIMIT_NIGHTS]
+    if args.start_date:
+        nights = [row for row in nights if row["night"] >= args.start_date]
+    if args.end_date:
+        nights = [row for row in nights if row["night"] <= args.end_date]
+    if args.start_date or args.end_date:
+        print(f"{len(nights)} nights remain after date filtering")
+
+    if args.limit:
+        nights = nights[: args.limit]
 
     all_frames = []
     failures = []
@@ -176,7 +218,7 @@ def main():
     for i, row in enumerate(nights, start=1):
         night = row["night"]
         url = row["nightsum_url"]
-        cache_path = CACHE_DIR / f"visits_{night}_lsstcam.json"
+        cache_path = cache_dir / f"visits_{night}_lsstcam.json"
 
         print(f"[{i}/{len(nights)}] {night} ({row['science_visits']} science visits)")
 
@@ -197,6 +239,9 @@ def main():
                 cache_path.write_bytes(json_bytes)
                 time.sleep(REQUEST_DELAY)
 
+            if args.json_only:
+                continue
+
             visits = json.loads(json_bytes)
             df = pd.DataFrame(visits)
             df.insert(0, "source_night", night)
@@ -207,16 +252,23 @@ def main():
             print(f"    FAILED: {exc}")
             failures.append(night)
 
+    if args.json_only:
+        print()
+        print(f"Downloaded/cached JSON for {len(nights) - len(failures)} nights")
+        if failures:
+            print(f"Nights that failed or had no JSON ({len(failures)}): {failures}")
+        return
+
     if not all_frames:
         print("No data collected -- nothing to save.")
         return
 
     combined = pd.concat(all_frames, ignore_index=True)
-    combined.to_csv(COMBINED_CSV, index=False)
+    combined.to_csv(combined_csv, index=False)
 
     print()
     print(f"Combined table: {len(combined)} visits across {len(all_frames)} nights")
-    print(f"Saved to: {COMBINED_CSV.resolve()}")
+    print(f"Saved to: {combined_csv.resolve()}")
     if failures:
         print(f"Nights that failed or had no JSON ({len(failures)}): {failures}")
 
