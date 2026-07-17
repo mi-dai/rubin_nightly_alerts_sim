@@ -34,7 +34,9 @@ def fit_single_lc(
     except Exception as e:
         passbands = PassbandGroup.from_preset("LSST", filters=['u','g', 'r', 'i', 'z', 'y'])
         for passband in passbands:
-            band = sncosmo.Bandpass(passband.transmission_table[:, 0], passband.transmission_table[:, 1], name='lynx_lsst_' + passband.filter_name)
+            band = sncosmo.Bandpass(passband.transmission_table[passband.transmission_table[:, 1]>1.e-4, 0], 
+                                    passband.transmission_table[passband.transmission_table[:, 1]>1.e-4, 1], 
+                                    name='lynx_lsst_' + passband.filter_name)
             sncosmo.register(band, name='lynx_lsst_' + passband.filter_name)
 
     """Fit a single light curve given single row of a NestedFrame"""
@@ -89,6 +91,7 @@ def fit_single_lc(
             modelpars,
             modelcov=modelcov,
             bounds=mpbounds.copy(),
+            guess_t0 = True,
             **kwargs,
         )
 
